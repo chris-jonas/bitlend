@@ -175,3 +175,124 @@
     ERR_POSITION_NOT_FOUND
   )
 )
+
+;; Execute liquidation
+(define-private (execute-liquidation (position-id uint))
+  (match (map-get? lending-positions { position-id: position-id })
+    position-data (let (
+        (borrower (get borrower position-data))
+        (collateral (get collateral-amount position-data))
+        (penalty (* collateral LIQUIDATION_PENALTY))
+        (remaining (- collateral penalty))
+      )
+      (begin
+        (map-set lending-positions { position-id: position-id }
+          (merge position-data { status: "liquidated" })
+        )
+        (var-set protocol-revenue (+ (var-get protocol-revenue) penalty))
+        (ok "liquidated")
+      )
+    )
+    ERR_POSITION_NOT_FOUND
+  )
+)
+
+;; VALIDATION FUNCTIONS
+(define-private (valid-position-id (id uint))
+  (and (> id u0) (<= id (var-get total-positions)))
+)
+
+(define-private (valid-asset (asset (string-ascii 4)))
+  (is-some (index-of SUPPORTED_ASSETS asset))
+)
+
+(define-private (valid-price (price uint))
+  (and (> price u0) (<= price u5000000000000))
+)
+
+;; PROTOCOL MANAGEMENT
+
+;; Initialize protocol
+(define-public (initialize-protocol)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (not (var-get protocol-active)) ERR_ALREADY_ACTIVE)
+
+    ;; Set initial price feeds
+    (map-set price-feeds { asset: "BTC" } {
+      price: u4500000000,
+      last-update: stacks-block-height,
+      volatility: u15,
+      confidence: u95,
+    })
+
+    (map-set price-feeds { asset: "STX" } {
+      price: u200000,
+      last-update: stacks-block-height,
+      volatility: u25,
+      confidence: u90,
+    })
+
+    (var-set protocol-active true)
+    (ok "initialized")
+  )
+)
+
+;; Emergency controls
+(define-public (toggle-emergency-pause)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set emergency-pause (not (var-get emergency-pause)))
+    (ok (var-get emergency-pause))
+  )
+)
+
+;; CORE LENDING OPERATIONS
+
+;; Deposit Bitcoin collateral
+(define-public (deposit-collateral (amount uint))
+  (begin
+    (asserts! (var-get protocol-active) ERR_NOT_INITIALIZED)
+    (asserts! (not (var-get emergency-pause)) ERR_MARKET_PROTECTION)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+
+    (var-set total-btc-reserves (+ (var-get total-btc-reserves) amount))
+
+    (match (map-get? user-accounts { user: tx-sender })
+      existing (map-set user-accounts { user: tx-sender }
+        (merge existing { total-collateral: (+ (get total-collateral existing) amount) })
+      )
+      (map-set user-accounts { user: tx-sender } {
+        position-ids: (list),
+        total-collateral: amount,
+        total-interest-paid: u0,
+        health-score: u100,
+      })
+    )
+
+    (ok amount)
+  )
+)
+
+;; Create lending position
+(define-public (create-position
+    (collateral uint)
+    (loan-amount uint)
+    (term-months uint)
+  )
+  (let (
+      (btc-price (unwrap! (get price (map-get? price-feeds { asset: "BTC" }))
+        ERR_ORACLE_FAILURE
+      ))
+      (volatility (unwrap! (get volatility (map-get? price-feeds { asset: "BTC" }))
+        ERR_ORACLE_FAILURE
+      ))
+      (collateral-value (* collateral btc-price))
+      (min-collateral (* loan-amount (var-get min-collateral-ratio)))
+      (new-id (+ (var-get total-positions) u1))
+      (interest-rate (+ u4 (/ volatility u5)))
+    )
+    (begin
+      (asserts! (var-get protocol-active) ERR_NOT_INITIALIZED)
+      (asserts! (>= collateral-value min-collateral) ERR_INSUFFICIENT_COLLATERAL)
+      (asserts! (<= term-months u36) ERR_INVALID_AMOUNT)
