@@ -296,3 +296,122 @@
       (asserts! (var-get protocol-active) ERR_NOT_INITIALIZED)
       (asserts! (>= collateral-value min-collateral) ERR_INSUFFICIENT_COLLATERAL)
       (asserts! (<= term-months u36) ERR_INVALID_AMOUNT)
+
+      (map-set lending-positions { position-id: new-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral,
+        loan-amount: loan-amount,
+        interest-rate: interest-rate,
+        created-block: stacks-block-height,
+        last-update: stacks-block-height,
+        status: "active",
+        risk-level: (if (>= collateral-value (* loan-amount u250))
+          "low"
+          "standard"
+        ),
+        protection-enabled: false,
+      })
+
+      (match (map-get? user-accounts { user: tx-sender })
+        existing (map-set user-accounts { user: tx-sender }
+          (merge existing { position-ids: (unwrap! (as-max-len? (append (get position-ids existing) new-id) u25)
+            ERR_INVALID_AMOUNT
+          ) }
+          ))
+        (map-set user-accounts { user: tx-sender } {
+          position-ids: (list new-id),
+          total-collateral: collateral,
+          total-interest-paid: u0,
+          health-score: u100,
+        })
+      )
+
+      (var-set total-positions new-id)
+      (ok new-id)
+    )
+  )
+)
+
+;; Repay loan
+(define-public (repay-loan
+    (position-id uint)
+    (amount uint)
+  )
+  (begin
+    (asserts! (valid-position-id position-id) ERR_INVALID_ID)
+
+    (let (
+        (position (unwrap! (map-get? lending-positions { position-id: position-id })
+          ERR_POSITION_NOT_FOUND
+        ))
+        (interest (calc-compound-interest (get loan-amount position)
+          (get interest-rate position)
+          (- stacks-block-height (get last-update position))
+        ))
+        (total-due (+ (get loan-amount position) interest))
+      )
+      (begin
+        (asserts! (is-eq (get status position) "active") ERR_POSITION_INACTIVE)
+        (asserts! (is-eq (get borrower position) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (>= amount total-due) ERR_INVALID_AMOUNT)
+
+        (map-set lending-positions { position-id: position-id }
+          (merge position {
+            status: "repaid",
+            last-update: stacks-block-height,
+          })
+        )
+
+        (var-set total-btc-reserves
+          (- (var-get total-btc-reserves) (get collateral-amount position))
+        )
+
+        (var-set protocol-revenue (+ (var-get protocol-revenue) interest))
+
+        (ok total-due)
+      )
+    )
+  )
+)
+
+;; GOVERNANCE FUNCTIONS
+
+;; Update collateral requirements
+(define-public (update-collateral-ratios
+    (new-min uint)
+    (new-liquidation uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (>= new-min u120) ERR_BELOW_THRESHOLD)
+    (asserts! (>= new-liquidation u110) ERR_BELOW_THRESHOLD)
+    (asserts! (> new-min new-liquidation) ERR_INVALID_AMOUNT)
+
+    (var-set min-collateral-ratio new-min)
+    (var-set liquidation-ratio new-liquidation)
+    (ok "ratios-updated")
+  )
+)
+
+;; Update price oracle
+(define-public (update-price-feed
+    (asset (string-ascii 4))
+    (price uint)
+    (volatility uint)
+    (confidence uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (valid-asset asset) ERR_UNSUPPORTED_ASSET)
+    (asserts! (valid-price price) ERR_ORACLE_FAILURE)
+    (asserts! (<= volatility u100) ERR_INVALID_AMOUNT)
+    (asserts! (<= confidence u100) ERR_INVALID_AMOUNT)
+
+    (ok (map-set price-feeds { asset: asset } {
+      price: price,
+      last-update: stacks-block-height,
+      volatility: volatility,
+      confidence: confidence,
+    }))
+  )
+)
