@@ -415,3 +415,108 @@
     }))
   )
 )
+
+;; Update protocol fee
+(define-public (update-protocol-fee (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-fee u10) ERR_INVALID_AMOUNT)
+
+    (var-set protocol-fee new-fee)
+    (ok "fee-updated")
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+;; Get position details
+(define-read-only (get-position-details (position-id uint))
+  (match (map-get? lending-positions { position-id: position-id })
+    position-data (let (
+        (btc-price (default-to u4500000000
+          (get price (map-get? price-feeds { asset: "BTC" }))
+        ))
+        (interest (calc-compound-interest (get loan-amount position-data)
+          (get interest-rate position-data)
+          (- stacks-block-height (get last-update position-data))
+        ))
+        (ratio (calc-collateral-ratio (get collateral-amount position-data)
+          (get loan-amount position-data) btc-price u15
+        ))
+      )
+      (ok {
+        position: position-data,
+        accrued-interest: interest,
+        collateral-ratio: ratio,
+        health-score: (assess-risk ratio
+          (- stacks-block-height (get created-block position-data)) u15
+        ),
+      })
+    )
+    ERR_POSITION_NOT_FOUND
+  )
+)
+
+;; Get user portfolio
+(define-read-only (get-user-portfolio (user principal))
+  (match (map-get? user-accounts { user: user })
+    account-data (ok {
+      positions: (get position-ids account-data),
+      total-collateral: (get total-collateral account-data),
+      interest-paid: (get total-interest-paid account-data),
+      health-score: (get health-score account-data),
+      position-count: (len (get position-ids account-data)),
+    })
+    (ok {
+      positions: (list),
+      total-collateral: u0,
+      interest-paid: u0,
+      health-score: u0,
+      position-count: u0,
+    })
+  )
+)
+
+;; Get protocol metrics
+(define-read-only (get-protocol-metrics)
+  (let (
+      (btc-price (default-to u4500000000 (get price (map-get? price-feeds { asset: "BTC" }))))
+      (tvl (* (var-get total-btc-reserves) btc-price))
+      (utilization (if (> (var-get total-btc-reserves) u0)
+        (/ (* (var-get total-positions) u100) (var-get total-btc-reserves))
+        u0
+      ))
+    )
+    (ok {
+      version: PROTOCOL_VERSION,
+      total-reserves: (var-get total-btc-reserves),
+      total-positions: (var-get total-positions),
+      total-value-locked: tvl,
+      protocol-revenue: (var-get protocol-revenue),
+      utilization-rate: utilization,
+      min-collateral: (var-get min-collateral-ratio),
+      liquidation-threshold: (var-get liquidation-ratio),
+      emergency-paused: (var-get emergency-pause),
+    })
+  )
+)
+
+;; Get price data
+(define-read-only (get-price-data (asset (string-ascii 4)))
+  (map-get? price-feeds { asset: asset })
+)
+
+;; Get supported assets
+(define-read-only (get-supported-assets)
+  SUPPORTED_ASSETS
+)
+
+;; Get protocol status
+(define-read-only (get-protocol-status)
+  (ok {
+    active: (var-get protocol-active),
+    paused: (var-get emergency-pause),
+    positions: (var-get total-positions),
+    version: PROTOCOL_VERSION,
+  })
+)
