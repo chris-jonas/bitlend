@@ -87,3 +87,91 @@
     confidence: uint,
   }
 )
+
+;; FINANCIAL CALCULATIONS
+
+;; Calculate collateral ratio with volatility adjustment
+(define-private (calc-collateral-ratio
+    (collateral uint)
+    (loan uint)
+    (price uint)
+    (volatility uint)
+  )
+  (let (
+      (adjusted-value (* (* collateral price) (- u100 volatility)))
+      (ratio (/ (* adjusted-value u100) loan))
+    )
+    (/ ratio u100)
+  )
+)
+
+;; Calculate compound interest
+(define-private (calc-compound-interest
+    (principal uint)
+    (rate uint)
+    (blocks uint)
+  )
+  (let (
+      (daily-rate (/ rate u365))
+      (periods (/ blocks BLOCKS_PER_DAY))
+      (compound-factor (+ u100 daily-rate))
+      (final-amount (* principal (pow compound-factor periods)))
+    )
+    (- final-amount principal)
+  )
+)
+
+;; Risk assessment algorithm
+(define-private (assess-risk
+    (ratio uint)
+    (age uint)
+    (volatility uint)
+  )
+  (let (
+      (ratio-score (if (>= ratio u200)
+        u30
+        u10
+      ))
+      (age-score (if (>= age u4320)
+        u20
+        u5
+      ))
+      (volatility-penalty (if (>= volatility u20)
+        u5
+        u0
+      ))
+      (total (- (+ ratio-score age-score) volatility-penalty))
+    )
+    (if (> total u50)
+      u50
+      total
+    )
+  )
+)
+
+;; Liquidation evaluation
+(define-private (check-liquidation (position-id uint))
+  (match (map-get? lending-positions { position-id: position-id })
+    position-data (let (
+        (btc-price (unwrap! (get price (map-get? price-feeds { asset: "BTC" }))
+          ERR_ORACLE_FAILURE
+        ))
+        (volatility (unwrap! (get volatility (map-get? price-feeds { asset: "BTC" }))
+          ERR_ORACLE_FAILURE
+        ))
+        (current-ratio (calc-collateral-ratio (get collateral-amount position-data)
+          (get loan-amount position-data) btc-price volatility
+        ))
+      )
+      (if (and
+          (<= current-ratio (var-get liquidation-ratio))
+          (is-eq (get status position-data) "active")
+          (not (get protection-enabled position-data))
+        )
+        (execute-liquidation position-id)
+        (ok "healthy")
+      )
+    )
+    ERR_POSITION_NOT_FOUND
+  )
+)
